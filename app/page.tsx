@@ -5,7 +5,7 @@ import { createClient } from '@/utils/supabase/client'
 import { useWebRTC } from '@/hooks/useWebRTC'
 import { 
   Mic, MicOff, Hash, LogOut, Send, 
-  Plus, Radio, User, MonitorCheck 
+  Plus, Radio, User, Monitor, MonitorX // <--- Добавили мониторы
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -82,70 +82,135 @@ function AuthScreen({ onLogin }: { onLogin: () => void }) {
   )
 }
 
-// 2. AUDIO PLAYER (Helper)
-const AudioPlayer = ({ stream }: { stream: MediaStream }) => {
-  const ref = useRef<HTMLAudioElement>(null)
+// Helper to play audio OR video
+const MediaRenderer = ({ stream, isLocal = false }: { stream: MediaStream, isLocal?: boolean }) => {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
+  
+  // Проверяем, есть ли видео-трек
+  const hasVideo = stream.getVideoTracks().length > 0
+
   useEffect(() => {
-    if (ref.current && stream) ref.current.srcObject = stream
-  }, [stream])
-  return <audio ref={ref} autoPlay />
+    if (hasVideo && videoRef.current) {
+        videoRef.current.srcObject = stream
+    } else if (audioRef.current) {
+        audioRef.current.srcObject = stream
+    }
+  }, [stream, hasVideo])
+
+  if (hasVideo) {
+      // Рендерим видео. isLocal нужно зеркалить или мьютить
+      return (
+        <video 
+           ref={videoRef} 
+           autoPlay 
+           playsInline 
+           muted // Видео всегда мьютим локально, чтобы не слышать себя, звук идет через audioRef у других
+           className="w-full h-full object-cover rounded-lg bg-black"
+        />
+      )
+  }
+
+  // Если только звук
+  return <audio ref={audioRef} autoPlay muted={isLocal} />
 }
 
 // 3. VOICE CONTROLS
 function VoiceControls({ room, user }: { room: Room, user: any }) {
-    const { peers, localStream, isMuted, toggleMute } = useWebRTC(room.id, user)
+    const { peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare } = useWebRTC(room.id, user)
+
+    // Фильтруем тех, кто стримит видео
+    const videoPeers = peers.filter(p => p.stream.getVideoTracks().length > 0)
+    // Я стримлю?
+    const iAmStreaming = localStream && localStream.getVideoTracks().length > 0
 
     return (
-      <div className="bg-emerald-950/30 border-t border-b border-emerald-900/50 backdrop-blur-sm p-3">
-        {/* ... верхняя часть без изменений ... */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2.5">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-            </span>
-            <div className="flex flex-col">
-              <span className="text-emerald-400 text-xs font-bold uppercase tracking-wider">Voice Connected</span>
-              <span className="text-emerald-500/60 text-[10px] font-mono">P2P MESH ACTIVE</span>
+      <div className="flex flex-col">
+        {/* VIDEO GRID (STAGE) - Показываем только если есть видео */}
+        {(videoPeers.length > 0 || iAmStreaming) && (
+            <div className="p-4 bg-[#09090b] border-b border-zinc-800 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto">
+                 {/* МОЙ СТРИМ */}
+                 {iAmStreaming && localStream && (
+                     <div className="relative aspect-video bg-zinc-900 rounded-xl overflow-hidden border border-indigo-500/50 shadow-lg">
+                        <MediaRenderer stream={localStream} isLocal={true} />
+                        <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs text-white font-medium">You (Screen)</div>
+                     </div>
+                 )}
+                 {/* ЧУЖИЕ СТРИМЫ */}
+                 {videoPeers.map(peer => (
+                     <div key={peer.id} className="relative aspect-video bg-zinc-900 rounded-xl overflow-hidden border border-zinc-700 shadow-lg">
+                        <MediaRenderer stream={peer.stream} />
+                        <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs text-white font-medium">
+                            {peer.username?.split('@')[0]}
+                        </div>
+                     </div>
+                 ))}
             </div>
-          </div>
-          
-          <button onClick={toggleMute} 
-            className={clsx(
-              "p-2 rounded-lg transition-all", 
-              isMuted ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-zinc-800 hover:bg-zinc-700 text-white"
-            )}>
-            {isMuted ? <MicOff size={16} /> : <Mic size={16} />}
-          </button>
-        </div>
-        
-        {/* Peers List */}
-        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-           {/* ME */}
-           <div className="flex flex-col items-center gap-1.5 min-w-[50px]">
-             <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-emerald-500/50 flex items-center justify-center relative overflow-hidden">
-                {user.email?.[0].toUpperCase()}
-                {isMuted && <div className="absolute inset-0 bg-red-500/50 flex items-center justify-center"><MicOff size={12}/></div>}
-             </div>
-             <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[50px]">You</span>
-           </div>
+        )}
 
-           {/* OTHERS (ИЗМЕНЕНИЯ ТУТ) */}
-           {peers.map(peer => (
-             <div key={peer.id} className="flex flex-col items-center gap-1.5 min-w-[50px]">
-                <div className="w-10 h-10 rounded-full bg-indigo-900/50 border-2 border-indigo-500 flex items-center justify-center relative">
-                  {/* Первая буква имени */}
-                  <span className="text-xs font-bold text-indigo-200">
-                    {peer.username ? peer.username[0].toUpperCase() : '?'}
-                  </span>
-                  <AudioPlayer stream={peer.stream} />
-                </div>
-                {/* Полное имя (обрезанное) */}
-                <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[60px]">
-                    {peer.username ? peer.username.split('@')[0] : 'Connecting...'}
+        {/* CONTROLS BAR */}
+        <div className="bg-emerald-950/30 border-t border-b border-emerald-900/50 backdrop-blur-sm p-3">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2.5">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
                 </span>
-             </div>
-           ))}
+                <div className="flex flex-col">
+                  <span className="text-emerald-400 text-xs font-bold uppercase tracking-wider">Voice Connected</span>
+                </div>
+              </div>
+              
+              <div className="flex gap-2">
+                  {/* КНОПКА ЭКРАНА */}
+                  <button onClick={toggleScreenShare} 
+                    className={clsx(
+                      "p-2 rounded-lg transition-all", 
+                      isScreenSharing ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" : "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                    )}>
+                    {isScreenSharing ? <MonitorX size={16} /> : <Monitor size={16} />}
+                  </button>
+
+                  <button onClick={toggleMute} 
+                    className={clsx(
+                      "p-2 rounded-lg transition-all", 
+                      isMuted ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-zinc-800 hover:bg-zinc-700 text-white"
+                    )}>
+                    {isMuted ? <MicOff size={16} /> : <Mic size={16} />}
+                  </button>
+              </div>
+            </div>
+            
+            {/* Peers List (Bubbles) */}
+            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+               {/* ME */}
+               <div className="flex flex-col items-center gap-1.5 min-w-[50px]">
+                 <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-emerald-500/50 flex items-center justify-center relative overflow-hidden">
+                    {user.email?.[0].toUpperCase()}
+                    {/* Важно: рендерим аудио скрыто, если это не видео */}
+                    {/* Но для себя аудио не нужно */}
+                 </div>
+                 <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[50px]">You</span>
+               </div>
+
+               {/* OTHERS */}
+               {peers.map(peer => (
+                 <div key={peer.id} className="flex flex-col items-center gap-1.5 min-w-[50px]">
+                    <div className="w-10 h-10 rounded-full bg-indigo-900/50 border-2 border-indigo-500 flex items-center justify-center relative overflow-hidden">
+                      <span className="text-xs font-bold text-indigo-200 z-10">
+                        {peer.username ? peer.username[0].toUpperCase() : '?'}
+                      </span>
+                      {/* Если это НЕ видео, проигрываем звук здесь. Если видео - оно играет в Grid сверху */}
+                      {peer.stream.getVideoTracks().length === 0 && (
+                          <MediaRenderer stream={peer.stream} />
+                      )}
+                    </div>
+                    <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[60px]">
+                        {peer.username ? peer.username.split('@')[0] : '...'}
+                    </span>
+                 </div>
+               ))}
+            </div>
         </div>
       </div>
     )

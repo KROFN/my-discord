@@ -12,20 +12,22 @@ const ICE_SERVERS = {
 interface Peer {
   id: string
   stream: MediaStream
-  username: string // <--- ДОБАВИЛИ ПОЛЕ
+  username: string
 }
 
 export function useWebRTC(roomId: string, user: any) {
   const [peers, setPeers] = useState<Peer[]>([])
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
+  const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   
   const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({})
-  // Записная книжка: ID -> Имя
   const peerUsernames = useRef<{ [key: string]: string }>({}) 
   const channelRef = useRef<RealtimeChannel | null>(null)
+  const screenTrackRef = useRef<MediaStreamTrack | null>(null) // Храним трек экрана
   const supabase = createClient()
 
+  // 1. ЗАХВАТ МИКРОФОНА
   useEffect(() => {
     if (!user) return
     let mounted = true
@@ -44,6 +46,56 @@ export function useWebRTC(roomId: string, user: any) {
     return () => { mounted = false }
   }, [user])
 
+  // 2. ФУНКЦИЯ ВКЛ/ВЫКЛ ЭКРАНА
+  const toggleScreenShare = async () => {
+    if (isScreenSharing) {
+      // ВЫКЛЮЧАЕМ
+      stopScreenShare()
+    } else {
+      // ВКЛЮЧАЕМ
+      try {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        const screenTrack = screenStream.getVideoTracks()[0]
+        
+        screenTrackRef.current = screenTrack
+        setIsScreenSharing(true)
+
+        // Добавляем трек экрана во все активные соединения
+        Object.values(peerConnections.current).forEach(pc => {
+          // sender заменяет или добавляет трек. В Mesh проще добавить новый.
+          // Используем addTrack, он триггернет negotiationneeded
+          if (localStream) {
+             pc.addTrack(screenTrack, localStream) 
+          }
+        })
+
+        // Если юзер нажмет "Остановить" в браузере (системная плашка)
+        screenTrack.onended = () => stopScreenShare()
+
+      } catch (err) {
+        console.error("Error sharing screen:", err)
+      }
+    }
+  }
+
+  const stopScreenShare = () => {
+    if (screenTrackRef.current) {
+      screenTrackRef.current.stop() // Останавливаем захват
+      
+      // Удаляем трек из всех соединений
+      Object.values(peerConnections.current).forEach(pc => {
+        const senders = pc.getSenders()
+        const videoSender = senders.find(s => s.track?.kind === 'video')
+        if (videoSender) {
+          pc.removeTrack(videoSender)
+        }
+      })
+      screenTrackRef.current = null
+      setIsScreenSharing(false)
+    }
+  }
+
+  // 3. СИГНАЛИЗАЦИЯ
   useEffect(() => {
     if (!roomId || !user || !localStream) return
     if (channelRef.current) return
@@ -57,17 +109,45 @@ export function useWebRTC(roomId: string, user: any) {
       const pc = new RTCPeerConnection(ICE_SERVERS)
       peerConnections.current[peerId] = pc
 
+      // Добавляем аудио
       localStream.getTracks().forEach((track) => pc.addTrack(track, localStream))
+      // Если уже стримим экран, добавляем и его сразу при подключении нового юзера
+      if (screenTrackRef.current) {
+        pc.addTrack(screenTrackRef.current, localStream)
+      }
+
+      // --- RENEGOTIATION (ВАЖНО ДЛЯ ЭКРАНА) ---
+      // Когда мы добавляем видео-трек, WebRTC понимает, что нужно обновить настройки
+      pc.onnegotiationneeded = async () => {
+          console.log(`🔄 Negotiation needed with ${peerId}`)
+          try {
+             // Проверка состояния, чтобы не нарваться на ошибку "stable"
+             if (pc.signalingState !== "stable") return;
+
+             const offer = await pc.createOffer()
+             await pc.setLocalDescription(offer)
+             
+             channel.send({
+                type: 'broadcast',
+                event: 'offer',
+                payload: { offer, to: peerId, from: user.id, username: user.email },
+             })
+          } catch (e) {
+             console.warn("Negotiation error:", e)
+          }
+      }
 
       pc.ontrack = (event) => {
-        console.log(`🔊 Received audio track from ${peerId}`)
+        console.log(`🔊/📺 Received track from ${peerId}:`, event.track.kind)
         const [remoteStream] = event.streams
         
-        // Достаем имя из "Записной книжки", или ставим 'Unknown', если не успело прийти
         const name = peerUsernames.current[peerId] || 'Unknown'
-        
         setPeers((prev) => {
-          if (prev.find(p => p.id === peerId)) return prev
+          // Если такой пир есть, обновляем его стрим (там могло появиться видео)
+          const existing = prev.find(p => p.id === peerId)
+          if (existing) {
+             return prev.map(p => p.id === peerId ? { ...p, stream: remoteStream } : p)
+          }
           return [...prev, { id: peerId, stream: remoteStream, username: name }]
         })
       }
@@ -100,21 +180,8 @@ export function useWebRTC(roomId: string, user: any) {
     channel
       .on('presence', { event: 'join' }, async ({ key }) => {
         if (key === user.id) return
-        const pc = createPeerConnection(key)
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        
-        // ОТПРАВЛЯЕМ СВОЕ ИМЯ В ОФФЕРЕ
-        channel.send({
-          type: 'broadcast',
-          event: 'offer',
-          payload: { 
-            offer, 
-            to: key, 
-            from: user.id,
-            username: user.email // <--- ВОТ ТУТ
-          },
-        })
+        createPeerConnection(key) 
+        // Мы НЕ создаем оффер тут вручную, так как сработает onnegotiationneeded при добавлении треков
       })
       .on('presence', { event: 'leave' }, ({ key }) => {
         setPeers(prev => prev.filter(p => p.id !== key))
@@ -125,45 +192,37 @@ export function useWebRTC(roomId: string, user: any) {
       })
       .on('broadcast', { event: 'offer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
-        
-        // ЗАПОМИНАЕМ ИМЯ ЗВОНЯЩЕГО
-        if (payload.username) {
-            peerUsernames.current[payload.from] = payload.username
-        }
-
-        const existingPc = peerConnections.current[payload.from]
-        if (existingPc && existingPc.signalingState !== 'stable') {
-           console.warn("⚠️ Re-negotiating connection...")
-        }
+        if (payload.username) peerUsernames.current[payload.from] = payload.username
 
         const pc = createPeerConnection(payload.from)
-        await pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
+        
+        // Избегаем конфликтов
+        if (pc.signalingState !== "stable") {
+             // Если мы уже что-то настраиваем, можно проигнорировать или откатить.
+             // Для простоты: пробуем установить remote
+             await Promise.all([
+                pc.setLocalDescription({type: "rollback"}),
+                pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
+             ]).catch(() => pc.setRemoteDescription(new RTCSessionDescription(payload.offer)))
+        } else {
+             await pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
+        }
+        
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
-        // ОТПРАВЛЯЕМ СВОЕ ИМЯ В ОТВЕТЕ
         channel.send({
           type: 'broadcast',
           event: 'answer',
-          payload: { 
-            answer, 
-            to: payload.from, 
-            from: user.id,
-            username: user.email // <--- И ВОТ ТУТ
-          },
+          payload: { answer, to: payload.from, from: user.id, username: user.email },
         })
       })
       .on('broadcast', { event: 'answer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
-        
-        // ЗАПОМИНАЕМ ИМЯ ОТВЕТИВШЕГО
-        if (payload.username) {
-            peerUsernames.current[payload.from] = payload.username
-        }
+        if (payload.username) peerUsernames.current[payload.from] = payload.username
 
         const pc = peerConnections.current[payload.from]
-        if (pc) {
-          if (pc.signalingState === 'stable') return 
+        if (pc && pc.signalingState !== 'stable') { 
           await pc.setRemoteDescription(new RTCSessionDescription(payload.answer))
         }
       })
@@ -184,21 +243,8 @@ export function useWebRTC(roomId: string, user: any) {
           const state = channel.presenceState()
           for (const peerId of Object.keys(state)) {
              if (peerId === user.id || peerConnections.current[peerId]) continue 
-             
-             const pc = createPeerConnection(peerId)
-             const offer = await pc.createOffer()
-             await pc.setLocalDescription(offer)
-             
-             channel.send({
-               type: 'broadcast',
-               event: 'offer',
-               payload: { 
-                 offer, 
-                 to: peerId, 
-                 from: user.id,
-                 username: user.email // <--- И ТУТ ТОЖЕ
-               },
-             })
+             createPeerConnection(peerId) 
+             // Оффер полетит сам из onnegotiationneeded
           }
         }
       })
@@ -207,6 +253,7 @@ export function useWebRTC(roomId: string, user: any) {
 
     return () => {
       console.log("🧹 Cleanup WebRTC")
+      if (screenTrackRef.current) screenTrackRef.current.stop()
       channel.untrack()
       channel.unsubscribe()
       channelRef.current = null
@@ -223,5 +270,5 @@ export function useWebRTC(roomId: string, user: any) {
     }
   }
 
-  return { peers, localStream, isMuted, toggleMute }
+  return { peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare }
 }
