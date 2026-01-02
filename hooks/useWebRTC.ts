@@ -2,11 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { RealtimeChannel } from '@supabase/supabase-js'
 
+// --- АНТИ-DPI КОНФИГ ---
+// Используем разные порты (80, 443, 3478), чтобы обойти простые фильтры
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' }
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.framasoft.org:3478' },
+    { urls: 'stun:stun.stunprotocol.org:3478' },
+    { urls: 'stun:stun.nextcloud.com:443' }, // Порт 443 часто пропускают (думают это HTTPS)
+    { urls: 'stun:stun.voip.blackberry.com:3478' },
   ],
+  iceCandidatePoolSize: 10,
 }
 
 interface Peer {
@@ -15,14 +23,24 @@ interface Peer {
   username: string
 }
 
+// Пользователь в комнате (данные из Presence)
+export interface RoomUser {
+  id: string
+  username: string
+  online_at: string
+}
+
 export function useWebRTC(roomId: string, user: any) {
+  // Список ВСЕХ в комнате (даже без микро)
+  const [activeUsers, setActiveUsers] = useState<RoomUser[]>([]) 
+  // Список тех, от кого есть медиа-поток
   const [peers, setPeers] = useState<Peer[]>([])
+  
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   
   const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({})
-  const peerUsernames = useRef<{ [key: string]: string }>({}) 
   const channelRef = useRef<RealtimeChannel | null>(null)
   const screenTrackRef = useRef<MediaStreamTrack | null>(null)
   
@@ -31,7 +49,7 @@ export function useWebRTC(roomId: string, user: any) {
   
   const supabase = createClient()
 
-  // 1. ЗАХВАТ МИКРОФОНА (С ФИКСОМ ДЛЯ ТЕХ, У КОГО ЕГО НЕТ)
+  // 1. ЗАХВАТ МИКРОФОНА
   useEffect(() => {
     if (!user) return
     let mounted = true
@@ -44,18 +62,15 @@ export function useWebRTC(roomId: string, user: any) {
           setLocalStream(stream)
         }
       } catch (err) {
-        console.warn("⚠️ No microphone found or permission denied. Joining in Listen-Only mode.")
-        if (mounted) {
-          // СОЗДАЕМ ПУСТОЙ СТРИМ, ЧТОБЫ ЛОГИКА НЕ ЛОМАЛАСЬ
-          setLocalStream(new MediaStream()) 
-        }
+        console.warn("⚠️ No microphone found. Joining in Listen-Only mode.")
+        if (mounted) setLocalStream(new MediaStream()) 
       }
     }
     initMedia()
     return () => { mounted = false }
   }, [user])
 
-  // 2. УПРАВЛЕНИЕ ЭКРАНОМ
+  // 2. ЭКРАН
   const toggleScreenShare = async () => {
     if (isScreenSharing) {
       stopScreenShare()
@@ -68,13 +83,10 @@ export function useWebRTC(roomId: string, user: any) {
         setIsScreenSharing(true)
 
         Object.values(peerConnections.current).forEach(pc => {
-          if (localStream) {
-             pc.addTrack(screenTrack, localStream) 
-          }
+          if (localStream) pc.addTrack(screenTrack, localStream) 
         })
 
         screenTrack.onended = () => stopScreenShare()
-
       } catch (err) {
         console.error("Error sharing screen:", err)
       }
@@ -109,13 +121,10 @@ export function useWebRTC(roomId: string, user: any) {
       makingOfferRef.current[peerId] = false
       ignoreOfferRef.current[peerId] = false
 
-      // Добавляем треки (если они есть)
       const tracks = localStream.getTracks()
       tracks.forEach((track) => pc.addTrack(track, localStream))
       
-      // --- ВАЖНЫЙ ФИКС ДЛЯ "БЕЗ МИКРОФОНА" ---
-      // Если у нас нет аудио-треков, мы должны принудительно сказать WebRTC:
-      // "Я хочу получать аудио, даже если сам молчу"
+      // Хак для "Немого": если нет треков, просим принимать
       if (tracks.length === 0) {
           pc.addTransceiver('audio', { direction: 'recvonly' })
       }
@@ -134,7 +143,7 @@ export function useWebRTC(roomId: string, user: any) {
           channel.send({
              type: 'broadcast',
              event: 'offer',
-             payload: { offer, to: peerId, from: user.id, username: user.email },
+             payload: { offer, to: peerId, from: user.id },
           })
         } catch (err) {
           console.error("Negotiation error:", err)
@@ -145,13 +154,12 @@ export function useWebRTC(roomId: string, user: any) {
 
       pc.ontrack = (event) => {
         const [remoteStream] = event.streams
-        const name = peerUsernames.current[peerId] || 'Unknown'
+        // Имя мы теперь берем из activeUsers, тут оно не критично, но сохраним для совместимости
+        const name = 'Peer' 
         
         setPeers((prev) => {
           const existing = prev.find(p => p.id === peerId)
-          if (existing) {
-             return prev.map(p => p.id === peerId ? { ...p, stream: remoteStream } : p)
-          }
+          if (existing) return prev.map(p => p.id === peerId ? { ...p, stream: remoteStream } : p)
           return [...prev, { id: peerId, stream: remoteStream, username: name }]
         })
 
@@ -180,6 +188,7 @@ export function useWebRTC(roomId: string, user: any) {
 
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState
+        console.log(`Connection with ${peerId}: ${state}`)
         if (state === 'disconnected' || state === 'failed' || state === 'closed') {
           setPeers(prev => prev.filter(p => p.id !== peerId))
           delete peerConnections.current[peerId]
@@ -194,12 +203,28 @@ export function useWebRTC(roomId: string, user: any) {
     })
 
     channel
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState()
+        // Превращаем странный объект Supabase Presence в нормальный массив
+        const users: RoomUser[] = []
+        for (const key in state) {
+            // @ts-ignore
+            const userData = state[key][0] as any
+            if (userData) {
+                users.push({
+                    id: key,
+                    username: userData.username || 'Unknown',
+                    online_at: userData.online_at
+                })
+            }
+        }
+        setActiveUsers(users)
+      })
       .on('presence', { event: 'join' }, ({ key }) => {
         if (key === user.id) return
         createPeerConnection(key)
       })
       .on('presence', { event: 'leave' }, ({ key }) => {
-        setPeers(prev => prev.filter(p => p.id !== key))
         if (peerConnections.current[key]) {
            peerConnections.current[key].close()
            delete peerConnections.current[key]
@@ -207,8 +232,6 @@ export function useWebRTC(roomId: string, user: any) {
       })
       .on('broadcast', { event: 'offer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
-        if (payload.username) peerUsernames.current[payload.from] = payload.username
-
         const pc = createPeerConnection(payload.from)
         
         const polite = user.id.localeCompare(payload.from) < 0 
@@ -233,13 +256,11 @@ export function useWebRTC(roomId: string, user: any) {
         channel.send({
           type: 'broadcast',
           event: 'answer',
-          payload: { answer, to: payload.from, from: user.id, username: user.email },
+          payload: { answer, to: payload.from, from: user.id },
         })
       })
       .on('broadcast', { event: 'answer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
-        if (payload.username) peerUsernames.current[payload.from] = payload.username
-        
         const pc = peerConnections.current[payload.from]
         if (pc) {
            if (ignoreOfferRef.current[payload.from]) {
@@ -255,15 +276,17 @@ export function useWebRTC(roomId: string, user: any) {
         if (payload.to !== user.id) return
         const pc = peerConnections.current[payload.from]
         try {
-           if (pc && pc.remoteDescription) {
-              await pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
-           }
+           if (pc && pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
         } catch (ignored) {}
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           console.log("✅ Subscribed to signaling")
-          await channel.track({ online_at: new Date().toISOString() })
+          // ОТПРАВЛЯЕМ СВОЁ ИМЯ ВМЕСТЕ С ПРИСУТСТВИЕМ!
+          await channel.track({ 
+              online_at: new Date().toISOString(),
+              username: user.email 
+          })
           
           const state = channel.presenceState()
           for (const peerId of Object.keys(state)) {
@@ -284,6 +307,7 @@ export function useWebRTC(roomId: string, user: any) {
       Object.values(peerConnections.current).forEach(pc => pc.close())
       peerConnections.current = {}
       setPeers([])
+      setActiveUsers([])
     }
   }, [roomId, user, localStream])
 
@@ -294,5 +318,5 @@ export function useWebRTC(roomId: string, user: any) {
     }
   }
 
-  return { peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare }
+  return { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare }
 }

@@ -79,12 +79,17 @@ const MediaRenderer = ({ stream, isLocal = false }: { stream: MediaStream, isLoc
 
 // 3. VOICE CONTROLS (С КНОПКОЙ ВЫХОДА)
 function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, onDisconnect: () => void }) {
-    const { peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare } = useWebRTC(room.id, user)
+    // Берем activeUsers!
+    const { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare } = useWebRTC(room.id, user)
+    
+    // Фильтруем видео только от тех, у кого оно реально есть
     const videoPeers = peers.filter(p => p.stream.getVideoTracks().length > 0)
     const iAmStreaming = localStream && localStream.getVideoTracks().length > 0
 
     return (
       <div className="flex flex-col animate-in slide-in-from-bottom duration-300">
+        
+        {/* ВИДЕО СЕТКА (Оставляем как было, тут видео важно) */}
         {(videoPeers.length > 0 || iAmStreaming) && (
             <div className="p-4 bg-[#09090b] border-b border-zinc-800 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto">
                  {iAmStreaming && localStream && (
@@ -93,12 +98,16 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
                         <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] text-white">You (Screen)</div>
                      </div>
                  )}
-                 {videoPeers.map(peer => (
+                 {videoPeers.map(peer => {
+                    // Ищем имя в activeUsers для красоты
+                    const userInfo = activeUsers.find(u => u.id === peer.id)
+                    const name = userInfo ? userInfo.username.split('@')[0] : 'Peer'
+                    return (
                      <div key={peer.id} className="relative aspect-video bg-zinc-900 rounded-xl overflow-hidden border border-zinc-700 shadow-lg">
                         <MediaRenderer stream={peer.stream} />
-                        <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] text-white">{peer.username?.split('@')[0]}</div>
+                        <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] text-white">{name}</div>
                      </div>
-                 ))}
+                 )})}
             </div>
         )}
 
@@ -119,27 +128,48 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
                   <button onClick={toggleMute} className={clsx("p-2 rounded-lg transition-all", isMuted ? "bg-red-500/20 text-red-400" : "bg-zinc-800 text-white")}>
                     {isMuted ? <MicOff size={16} /> : <Mic size={16} />}
                   </button>
-                  {/* КНОПКА ВЫХОДА */}
                   <button onClick={onDisconnect} className="p-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-all active:scale-95 shadow-lg shadow-red-900/20">
                     <PhoneOff size={16} />
                   </button>
               </div>
             </div>
             
+            {/* СПИСОК ЮЗЕРОВ (ТЕПЕРЬ НА ОСНОВЕ ACTIVE USERS) */}
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-               <div className="flex flex-col items-center gap-1 min-w-[45px]">
-                 <div className="w-9 h-9 rounded-full bg-zinc-800 border-2 border-emerald-500/50 flex items-center justify-center relative overflow-hidden text-xs font-bold">{user.email?.[0].toUpperCase()}</div>
-                 <span className="text-[9px] text-zinc-500 font-medium">You</span>
-               </div>
-               {peers.map(peer => (
-                 <div key={peer.id} className="flex flex-col items-center gap-1 min-w-[45px]">
-                    <div className="w-9 h-9 rounded-full bg-indigo-900/40 border-2 border-indigo-500/50 flex items-center justify-center relative overflow-hidden">
-                      <span className="text-xs font-bold text-indigo-300 z-10">{peer.username ? peer.username[0].toUpperCase() : '?'}</span>
-                      {peer.stream.getVideoTracks().length === 0 && <MediaRenderer stream={peer.stream} />}
+               {/* Рендерим ВСЕХ активных юзеров, включая себя */}
+               {activeUsers.map(u => {
+                 const isMe = u.id === user.id
+                 // Ищем стрим этого юзера
+                 const peerData = peers.find(p => p.id === u.id)
+                 const hasAudio = peerData && peerData.stream.getAudioTracks().length > 0
+                 
+                 return (
+                 <div key={u.id} className="flex flex-col items-center gap-1 min-w-[45px]">
+                    <div className={clsx(
+                        "w-9 h-9 rounded-full border-2 flex items-center justify-center relative overflow-hidden text-xs font-bold transition-all",
+                        isMe ? "bg-zinc-800 border-emerald-500/50" : "bg-indigo-900/40 border-indigo-500/50"
+                    )}>
+                      <span className={clsx("z-10", isMe ? "text-white" : "text-indigo-300")}>
+                          {u.username[0].toUpperCase()}
+                      </span>
+                      
+                      {/* Если это не я и у него есть стрим — рендерим аудио */}
+                      {!isMe && peerData && peerData.stream.getVideoTracks().length === 0 && (
+                          <MediaRenderer stream={peerData.stream} />
+                      )}
+
+                      {/* Индикатор "без микро" */}
+                      {!isMe && !hasAudio && (
+                          <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                              <MicOff size={10} className="text-zinc-500" />
+                          </div>
+                      )}
                     </div>
-                    <span className="text-[9px] text-zinc-400 font-medium truncate max-w-[45px]">{peer.username?.split('@')[0]}</span>
+                    <span className="text-[9px] text-zinc-400 font-medium truncate max-w-[45px]">
+                        {isMe ? 'You' : u.username.split('@')[0]}
+                    </span>
                  </div>
-               ))}
+               )})}
             </div>
         </div>
       </div>
