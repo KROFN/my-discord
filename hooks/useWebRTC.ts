@@ -2,8 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { RealtimeChannel } from '@supabase/supabase-js'
 
-// --- АНТИ-DPI КОНФИГ ---
-// Используем разные порты (80, 443, 3478), чтобы обойти простые фильтры
+// --- АНТИ-DPI КОНФИГ (ПОЛНЫЙ СПИСОК) ---
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -11,8 +10,10 @@ const ICE_SERVERS = {
     { urls: 'stun:stun.global.stun.twilio.com:3478' },
     { urls: 'stun:stun.framasoft.org:3478' },
     { urls: 'stun:stun.stunprotocol.org:3478' },
-    { urls: 'stun:stun.nextcloud.com:443' }, // Порт 443 часто пропускают (думают это HTTPS)
+    { urls: 'stun:stun.nextcloud.com:443' }, // Порт 443 для маскировки под HTTPS
     { urls: 'stun:stun.voip.blackberry.com:3478' },
+    { urls: 'stun:stun.samsungsmartcam.com:3478' },
+    { urls: 'stun:stun.services.mozilla.com:3478' }
   ],
   iceCandidatePoolSize: 10,
 }
@@ -23,24 +24,28 @@ interface Peer {
   username: string
 }
 
-// Пользователь в комнате (данные из Presence)
 export interface RoomUser {
   id: string
   username: string
   online_at: string
 }
 
+export interface PeerStats {
+  rtt: number
+  packetLoss: number
+}
+
 export function useWebRTC(roomId: string, user: any) {
-  // Список ВСЕХ в комнате (даже без микро)
   const [activeUsers, setActiveUsers] = useState<RoomUser[]>([]) 
-  // Список тех, от кого есть медиа-поток
   const [peers, setPeers] = useState<Peer[]>([])
+  const [stats, setStats] = useState<{ [key: string]: PeerStats }>({})
   
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   
   const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({})
+  const peerUsernames = useRef<{ [key: string]: string }>({}) 
   const channelRef = useRef<RealtimeChannel | null>(null)
   const screenTrackRef = useRef<MediaStreamTrack | null>(null)
   
@@ -70,7 +75,34 @@ export function useWebRTC(roomId: string, user: any) {
     return () => { mounted = false }
   }, [user])
 
-  // 2. ЭКРАН
+  // 2. МОНИТОРИНГ СЕТИ (ПИНГ)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const newStats: { [key: string]: PeerStats } = {}
+      
+      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+        try {
+          const statsReport = await pc.getStats()
+          statsReport.forEach(report => {
+            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+              const rtt = Math.round(report.currentRoundTripTime * 1000) || 0
+              newStats[peerId] = { rtt, packetLoss: 0 }
+            }
+          })
+        } catch (e) {
+          console.warn("Stats error", e)
+        }
+      }
+      
+      if (Object.keys(newStats).length > 0) {
+        setStats(prev => ({ ...prev, ...newStats }))
+      }
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [])
+
+  // 3. ЭКРАН
   const toggleScreenShare = async () => {
     if (isScreenSharing) {
       stopScreenShare()
@@ -106,7 +138,7 @@ export function useWebRTC(roomId: string, user: any) {
     }
   }
 
-  // 3. СИГНАЛИЗАЦИЯ
+  // 4. СИГНАЛИЗАЦИЯ
   useEffect(() => {
     if (!roomId || !user || !localStream) return
     if (channelRef.current) return
@@ -124,7 +156,6 @@ export function useWebRTC(roomId: string, user: any) {
       const tracks = localStream.getTracks()
       tracks.forEach((track) => pc.addTrack(track, localStream))
       
-      // Хак для "Немого": если нет треков, просим принимать
       if (tracks.length === 0) {
           pc.addTransceiver('audio', { direction: 'recvonly' })
       }
@@ -154,7 +185,7 @@ export function useWebRTC(roomId: string, user: any) {
 
       pc.ontrack = (event) => {
         const [remoteStream] = event.streams
-        // Имя мы теперь берем из activeUsers, тут оно не критично, но сохраним для совместимости
+        // Имя берем из activeUsers, тут заглушка
         const name = 'Peer' 
         
         setPeers((prev) => {
@@ -188,7 +219,6 @@ export function useWebRTC(roomId: string, user: any) {
 
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState
-        console.log(`Connection with ${peerId}: ${state}`)
         if (state === 'disconnected' || state === 'failed' || state === 'closed') {
           setPeers(prev => prev.filter(p => p.id !== peerId))
           delete peerConnections.current[peerId]
@@ -205,7 +235,6 @@ export function useWebRTC(roomId: string, user: any) {
     channel
       .on('presence', { event: 'sync' }, () => {
         const state = channel.presenceState()
-        // Превращаем странный объект Supabase Presence в нормальный массив
         const users: RoomUser[] = []
         for (const key in state) {
             // @ts-ignore
@@ -282,7 +311,6 @@ export function useWebRTC(roomId: string, user: any) {
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           console.log("✅ Subscribed to signaling")
-          // ОТПРАВЛЯЕМ СВОЁ ИМЯ ВМЕСТЕ С ПРИСУТСТВИЕМ!
           await channel.track({ 
               online_at: new Date().toISOString(),
               username: user.email 
@@ -308,6 +336,7 @@ export function useWebRTC(roomId: string, user: any) {
       peerConnections.current = {}
       setPeers([])
       setActiveUsers([])
+      setStats({})
     }
   }, [roomId, user, localStream])
 
@@ -318,5 +347,5 @@ export function useWebRTC(roomId: string, user: any) {
     }
   }
 
-  return { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare }
+  return { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare, stats }
 }

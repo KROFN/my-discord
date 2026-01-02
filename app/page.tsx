@@ -79,17 +79,17 @@ const MediaRenderer = ({ stream, isLocal = false }: { stream: MediaStream, isLoc
 
 // 3. VOICE CONTROLS (С КНОПКОЙ ВЫХОДА)
 function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, onDisconnect: () => void }) {
-    // Берем activeUsers!
-    const { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare } = useWebRTC(room.id, user)
+    // Достаем stats
+    const { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare, stats } = useWebRTC(room.id, user)
     
-    // Фильтруем видео только от тех, у кого оно реально есть
+    // ... videoPeers и iAmStreaming без изменений ...
     const videoPeers = peers.filter(p => p.stream.getVideoTracks().length > 0)
     const iAmStreaming = localStream && localStream.getVideoTracks().length > 0
 
     return (
       <div className="flex flex-col animate-in slide-in-from-bottom duration-300">
         
-        {/* ВИДЕО СЕТКА (Оставляем как было, тут видео важно) */}
+        {/* VIDEO GRID ... (без изменений) ... */}
         {(videoPeers.length > 0 || iAmStreaming) && (
             <div className="p-4 bg-[#09090b] border-b border-zinc-800 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto">
                  {iAmStreaming && localStream && (
@@ -99,7 +99,6 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
                      </div>
                  )}
                  {videoPeers.map(peer => {
-                    // Ищем имя в activeUsers для красоты
                     const userInfo = activeUsers.find(u => u.id === peer.id)
                     const name = userInfo ? userInfo.username.split('@')[0] : 'Peer'
                     return (
@@ -112,6 +111,7 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
         )}
 
         <div className="bg-emerald-950/20 border-t border-b border-emerald-900/30 backdrop-blur-md p-3">
+            {/* ... Кнопки управления ... */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2.5">
                 <span className="relative flex h-2 w-2">
@@ -134,17 +134,29 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
               </div>
             </div>
             
-            {/* СПИСОК ЮЗЕРОВ (ТЕПЕРЬ НА ОСНОВЕ ACTIVE USERS) */}
+            {/* СПИСОК ЮЗЕРОВ СО СТАТИСТИКОЙ */}
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-               {/* Рендерим ВСЕХ активных юзеров, включая себя */}
                {activeUsers.map(u => {
                  const isMe = u.id === user.id
-                 // Ищем стрим этого юзера
                  const peerData = peers.find(p => p.id === u.id)
                  const hasAudio = peerData && peerData.stream.getAudioTracks().length > 0
                  
+                 // Достаем пинг для этого юзера
+                 const userStats = stats[u.id]
+                 const ping = userStats?.rtt || 0
+                 
+                 // Цвет пинга
+                 const pingColor = ping < 100 ? "text-emerald-500" : ping < 300 ? "text-yellow-500" : "text-red-500"
+
                  return (
-                 <div key={u.id} className="flex flex-col items-center gap-1 min-w-[45px]">
+                 <div key={u.id} className="flex flex-col items-center gap-1 min-w-[45px] group relative">
+                    {/* Tooltip с пингом (показываем при наведении, если не я) */}
+                    {!isMe && ping > 0 && (
+                        <div className="absolute -top-6 bg-black text-[9px] px-1.5 py-0.5 rounded text-white opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20">
+                            {ping}ms
+                        </div>
+                    )}
+
                     <div className={clsx(
                         "w-9 h-9 rounded-full border-2 flex items-center justify-center relative overflow-hidden text-xs font-bold transition-all",
                         isMe ? "bg-zinc-800 border-emerald-500/50" : "bg-indigo-900/40 border-indigo-500/50"
@@ -153,21 +165,27 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
                           {u.username[0].toUpperCase()}
                       </span>
                       
-                      {/* Если это не я и у него есть стрим — рендерим аудио */}
                       {!isMe && peerData && peerData.stream.getVideoTracks().length === 0 && (
                           <MediaRenderer stream={peerData.stream} />
                       )}
 
-                      {/* Индикатор "без микро" */}
                       {!isMe && !hasAudio && (
                           <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
                               <MicOff size={10} className="text-zinc-500" />
                           </div>
                       )}
                     </div>
-                    <span className="text-[9px] text-zinc-400 font-medium truncate max-w-[45px]">
-                        {isMe ? 'You' : u.username.split('@')[0]}
-                    </span>
+                    
+                    {/* Имя и иконка пинга */}
+                    <div className="flex items-center gap-0.5 max-w-[50px]">
+                        <span className="text-[9px] text-zinc-400 font-medium truncate flex-1">
+                            {isMe ? 'You' : u.username.split('@')[0]}
+                        </span>
+                        {/* Показываем палочки сигнала */}
+                        {!isMe && ping > 0 && (
+                             <Signal size={8} className={pingColor} />
+                        )}
+                    </div>
                  </div>
                )})}
             </div>
