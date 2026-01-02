@@ -6,7 +6,7 @@ import { useWebRTC } from '@/hooks/useWebRTC'
 import { 
   Mic, MicOff, Hash, LogOut, Send, 
   Plus, Radio, User, Monitor, MonitorX,
-  Phone, PhoneOff, Video // <--- Новые иконки
+  Phone, PhoneOff, Video, Signal // <--- ВОТ ОНА, РОДНАЯ
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -77,19 +77,17 @@ const MediaRenderer = ({ stream, isLocal = false }: { stream: MediaStream, isLoc
   return <audio ref={audioRef} autoPlay muted={isLocal} />
 }
 
-// 3. VOICE CONTROLS (С КНОПКОЙ ВЫХОДА)
+// 3. VOICE CONTROLS
 function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, onDisconnect: () => void }) {
-    // Достаем stats
     const { activeUsers, peers, localStream, isMuted, toggleMute, isScreenSharing, toggleScreenShare, stats } = useWebRTC(room.id, user)
     
-    // ... videoPeers и iAmStreaming без изменений ...
     const videoPeers = peers.filter(p => p.stream.getVideoTracks().length > 0)
     const iAmStreaming = localStream && localStream.getVideoTracks().length > 0
 
     return (
       <div className="flex flex-col animate-in slide-in-from-bottom duration-300">
         
-        {/* VIDEO GRID ... (без изменений) ... */}
+        {/* VIDEO GRID */}
         {(videoPeers.length > 0 || iAmStreaming) && (
             <div className="p-4 bg-[#09090b] border-b border-zinc-800 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto">
                  {iAmStreaming && localStream && (
@@ -110,8 +108,8 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
             </div>
         )}
 
+        {/* CONTROLS & USERS */}
         <div className="bg-emerald-950/20 border-t border-b border-emerald-900/30 backdrop-blur-md p-3">
-            {/* ... Кнопки управления ... */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2.5">
                 <span className="relative flex h-2 w-2">
@@ -134,23 +132,19 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
               </div>
             </div>
             
-            {/* СПИСОК ЮЗЕРОВ СО СТАТИСТИКОЙ */}
+            {/* USER LIST WITH PING */}
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
                {activeUsers.map(u => {
                  const isMe = u.id === user.id
                  const peerData = peers.find(p => p.id === u.id)
                  const hasAudio = peerData && peerData.stream.getAudioTracks().length > 0
                  
-                 // Достаем пинг для этого юзера
                  const userStats = stats[u.id]
                  const ping = userStats?.rtt || 0
-                 
-                 // Цвет пинга
                  const pingColor = ping < 100 ? "text-emerald-500" : ping < 300 ? "text-yellow-500" : "text-red-500"
 
                  return (
                  <div key={u.id} className="flex flex-col items-center gap-1 min-w-[45px] group relative">
-                    {/* Tooltip с пингом (показываем при наведении, если не я) */}
                     {!isMe && ping > 0 && (
                         <div className="absolute -top-6 bg-black text-[9px] px-1.5 py-0.5 rounded text-white opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20">
                             {ping}ms
@@ -176,12 +170,10 @@ function VoiceControls({ room, user, onDisconnect }: { room: Room, user: any, on
                       )}
                     </div>
                     
-                    {/* Имя и иконка пинга */}
                     <div className="flex items-center gap-0.5 max-w-[50px]">
                         <span className="text-[9px] text-zinc-400 font-medium truncate flex-1">
                             {isMe ? 'You' : u.username.split('@')[0]}
                         </span>
-                        {/* Показываем палочки сигнала */}
                         {!isMe && ping > 0 && (
                              <Signal size={8} className={pingColor} />
                         )}
@@ -199,7 +191,7 @@ export default function DiscordLite() {
   const [user, setUser] = useState<any>(null)
   const [rooms, setRooms] = useState<Room[]>([])
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null)
-  const [isInVoice, setIsInVoice] = useState(false) // <--- НОВЫЙ СТЕЙТ
+  const [isInVoice, setIsInVoice] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState('')
   
@@ -228,7 +220,7 @@ export default function DiscordLite() {
 
   useEffect(() => {
     if (!currentRoom) return
-    setIsInVoice(false) // Выключаем гс при смене комнаты
+    setIsInVoice(false)
 
     const fetchMessages = async () => {
       const { data } = await supabase.from('messages').select('*, profiles(username)').eq('room_id', currentRoom.id).order('created_at', { ascending: true })
@@ -310,7 +302,6 @@ export default function DiscordLite() {
                 <span className="font-bold text-white tracking-tight">{currentRoom.name}</span>
               </div>
               
-              {/* КНОПКА JOIN VOICE В ХЕДЕРЕ */}
               {!isInVoice && (
                   <button onClick={() => setIsInVoice(true)} className="flex items-center gap-2 px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600 text-emerald-500 hover:text-white rounded-lg text-xs font-bold transition-all active:scale-95">
                     <Phone size={14} /> Join Voice
@@ -343,7 +334,6 @@ export default function DiscordLite() {
 
             <div className="bg-[#09090b] px-4 pb-6 pt-2">
               <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl transition-all">
-                {/* VOICE CONTROLS (Только если isInVoice) */}
                 {isInVoice && (
                     <VoiceControls room={currentRoom} user={user} onDisconnect={() => setIsInVoice(false)} />
                 )}
