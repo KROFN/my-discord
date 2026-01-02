@@ -12,6 +12,7 @@ const ICE_SERVERS = {
 interface Peer {
   id: string
   stream: MediaStream
+  username: string // <--- ДОБАВИЛИ ПОЛЕ
 }
 
 export function useWebRTC(roomId: string, user: any) {
@@ -19,15 +20,14 @@ export function useWebRTC(roomId: string, user: any) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [isMuted, setIsMuted] = useState(false)
   
-  // Храним активные соединения
   const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({})
+  // Записная книжка: ID -> Имя
+  const peerUsernames = useRef<{ [key: string]: string }>({}) 
   const channelRef = useRef<RealtimeChannel | null>(null)
   const supabase = createClient()
 
-  // 1. ЗАХВАТ МИКРОФОНА (Один раз при входе)
   useEffect(() => {
     if (!user) return
-
     let mounted = true
     async function initMedia() {
       try {
@@ -41,50 +41,37 @@ export function useWebRTC(roomId: string, user: any) {
       }
     }
     initMedia()
-
-    return () => {
-      mounted = false
-      // Не останавливаем треки здесь, чтобы не ломать переключения, 
-      // но в реальном приложении можно делать cleanup
-    }
+    return () => { mounted = false }
   }, [user])
 
-  // 2. СИГНАЛИЗАЦИЯ
   useEffect(() => {
     if (!roomId || !user || !localStream) return
-
-    // Чтобы не создавать канал дважды
     if (channelRef.current) return
 
     console.log(`🔌 Initializing signaling for room: ${roomId}`)
 
-    // --- ФУНКЦИЯ СОЗДАНИЯ PEER CONNECTION ---
     const createPeerConnection = (peerId: string) => {
-      // ЗАЩИТА ОТ ДУБЛЕЙ: Если соединение уже есть — не создаем новое
-      if (peerConnections.current[peerId]) {
-        return peerConnections.current[peerId]
-      }
+      if (peerConnections.current[peerId]) return peerConnections.current[peerId]
 
       console.log(`🔗 Creating NEW PeerConnection with ${peerId}`)
       const pc = new RTCPeerConnection(ICE_SERVERS)
       peerConnections.current[peerId] = pc
 
-      // Добавляем локальный звук
-      localStream.getTracks().forEach((track) => {
-        pc.addTrack(track, localStream)
-      })
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream))
 
-      // Когда получаем удаленный звук
       pc.ontrack = (event) => {
         console.log(`🔊 Received audio track from ${peerId}`)
         const [remoteStream] = event.streams
+        
+        // Достаем имя из "Записной книжки", или ставим 'Unknown', если не успело прийти
+        const name = peerUsernames.current[peerId] || 'Unknown'
+        
         setPeers((prev) => {
           if (prev.find(p => p.id === peerId)) return prev
-          return [...prev, { id: peerId, stream: remoteStream }]
+          return [...prev, { id: peerId, stream: remoteStream, username: name }]
         })
       }
 
-      // ICE Candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           channel.send({
@@ -95,13 +82,10 @@ export function useWebRTC(roomId: string, user: any) {
         }
       }
 
-      // Обработка разрыва соединения
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState
-        console.log(`📶 Connection state with ${peerId}: ${state}`)
         if (state === 'disconnected' || state === 'failed' || state === 'closed') {
           setPeers(prev => prev.filter(p => p.id !== peerId))
-          // Удаляем из рефов, чтобы можно было переподключиться
           delete peerConnections.current[peerId]
         }
       }
@@ -114,30 +98,25 @@ export function useWebRTC(roomId: string, user: any) {
     })
 
     channel
-      .on('presence', { event: 'sync' }, () => {
-        // Sync срабатывает часто. Мы используем его только для логов,
-        // логика инициализации вынесена в 'join' и подписку.
-        const state = channel.presenceState()
-        console.log('👥 Presence Sync:', Object.keys(state).length, 'users')
-      })
       .on('presence', { event: 'join' }, async ({ key }) => {
         if (key === user.id) return
-        console.log(`👤 User JOINED: ${key}`)
-        
-        // ВАЖНО: В Mesh-сети, когда кто-то заходит, мы (старички)
-        // можем инициировать соединение к нему. Это надежнее.
         const pc = createPeerConnection(key)
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         
+        // ОТПРАВЛЯЕМ СВОЕ ИМЯ В ОФФЕРЕ
         channel.send({
           type: 'broadcast',
           event: 'offer',
-          payload: { offer, to: key, from: user.id },
+          payload: { 
+            offer, 
+            to: key, 
+            from: user.id,
+            username: user.email // <--- ВОТ ТУТ
+          },
         })
       })
       .on('presence', { event: 'leave' }, ({ key }) => {
-        console.log(`👋 User LEFT: ${key}`)
         setPeers(prev => prev.filter(p => p.id !== key))
         if (peerConnections.current[key]) {
           peerConnections.current[key].close()
@@ -146,13 +125,14 @@ export function useWebRTC(roomId: string, user: any) {
       })
       .on('broadcast', { event: 'offer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
-        console.log(`📩 Received OFFER from ${payload.from}`)
+        
+        // ЗАПОМИНАЕМ ИМЯ ЗВОНЯЩЕГО
+        if (payload.username) {
+            peerUsernames.current[payload.from] = payload.username
+        }
 
-        // Если нам кидают оффер, а мы уже соединены — игнор (чтобы не было лупа)
         const existingPc = peerConnections.current[payload.from]
         if (existingPc && existingPc.signalingState !== 'stable') {
-           // Конфликт (Glare). Пропускаем, если наш ID больше (простая эвристика)
-           // Но для простоты: просто принимаем оффер, перезаписывая старое.
            console.warn("⚠️ Re-negotiating connection...")
         }
 
@@ -161,19 +141,28 @@ export function useWebRTC(roomId: string, user: any) {
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
+        // ОТПРАВЛЯЕМ СВОЕ ИМЯ В ОТВЕТЕ
         channel.send({
           type: 'broadcast',
           event: 'answer',
-          payload: { answer, to: payload.from, from: user.id },
+          payload: { 
+            answer, 
+            to: payload.from, 
+            from: user.id,
+            username: user.email // <--- И ВОТ ТУТ
+          },
         })
       })
       .on('broadcast', { event: 'answer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
-        console.log(`📩 Received ANSWER from ${payload.from}`)
         
+        // ЗАПОМИНАЕМ ИМЯ ОТВЕТИВШЕГО
+        if (payload.username) {
+            peerUsernames.current[payload.from] = payload.username
+        }
+
         const pc = peerConnections.current[payload.from]
         if (pc) {
-          // Если уже соединены, ответ не нужен
           if (pc.signalingState === 'stable') return 
           await pc.setRemoteDescription(new RTCSessionDescription(payload.answer))
         }
@@ -181,10 +170,10 @@ export function useWebRTC(roomId: string, user: any) {
       .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
         if (payload.to !== user.id) return
         const pc = peerConnections.current[payload.from]
-        if (pc && pc.remoteDescription) { // Добавляем айс только если есть Remote Description
+        if (pc && pc.remoteDescription) {
           try {
             await pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
-          } catch (e) { console.warn("ICE Error", e) }
+          } catch (e) { console.warn(e) }
         }
       })
       .subscribe(async (status) => {
@@ -192,16 +181,10 @@ export function useWebRTC(roomId: string, user: any) {
           console.log("✅ Subscribed to signaling")
           await channel.track({ online_at: new Date().toISOString() })
           
-          // При входе: сканируем кто уже есть и звоним им
           const state = channel.presenceState()
-          const onlineUsers = Object.keys(state)
-          
-          for (const peerId of onlineUsers) {
-             if (peerId === user.id) continue
-             // Если мы уже создали коннект (например, через join event), пропускаем
-             if (peerConnections.current[peerId]) continue 
-
-             console.log(`🚀 Calling existing user: ${peerId}`)
+          for (const peerId of Object.keys(state)) {
+             if (peerId === user.id || peerConnections.current[peerId]) continue 
+             
              const pc = createPeerConnection(peerId)
              const offer = await pc.createOffer()
              await pc.setLocalDescription(offer)
@@ -209,7 +192,12 @@ export function useWebRTC(roomId: string, user: any) {
              channel.send({
                type: 'broadcast',
                event: 'offer',
-               payload: { offer, to: peerId, from: user.id },
+               payload: { 
+                 offer, 
+                 to: peerId, 
+                 from: user.id,
+                 username: user.email // <--- И ТУТ ТОЖЕ
+               },
              })
           }
         }
@@ -217,7 +205,6 @@ export function useWebRTC(roomId: string, user: any) {
 
     channelRef.current = channel
 
-    // CLEANUP при выходе из комнаты
     return () => {
       console.log("🧹 Cleanup WebRTC")
       channel.untrack()
@@ -231,9 +218,7 @@ export function useWebRTC(roomId: string, user: any) {
 
   const toggleMute = () => {
     if (localStream) {
-      localStream.getAudioTracks().forEach(track => {
-        track.enabled = !track.enabled
-      })
+      localStream.getAudioTracks().forEach(track => { track.enabled = !track.enabled })
       setIsMuted(!isMuted)
     }
   }

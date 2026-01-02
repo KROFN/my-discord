@@ -91,14 +91,13 @@ const AudioPlayer = ({ stream }: { stream: MediaStream }) => {
   return <audio ref={ref} autoPlay />
 }
 
-// 3. VOICE CONTROLS (ВЫНЕСЛИ НАРУЖУ!)
-// Теперь он не пересоздается при каждом нажатии клавиши
+// 3. VOICE CONTROLS
 function VoiceControls({ room, user }: { room: Room, user: any }) {
-    // Хук вызывается здесь. Пока пропсы room и user те же, хук живет и не перезагружается.
     const { peers, localStream, isMuted, toggleMute } = useWebRTC(room.id, user)
 
     return (
       <div className="bg-emerald-950/30 border-t border-b border-emerald-900/50 backdrop-blur-sm p-3">
+        {/* ... верхняя часть без изменений ... */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2.5">
             <span className="relative flex h-3 w-3">
@@ -128,24 +127,29 @@ function VoiceControls({ room, user }: { room: Room, user: any }) {
                 {user.email?.[0].toUpperCase()}
                 {isMuted && <div className="absolute inset-0 bg-red-500/50 flex items-center justify-center"><MicOff size={12}/></div>}
              </div>
-             <span className="text-[10px] text-zinc-400 font-medium">You</span>
+             <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[50px]">You</span>
            </div>
 
-           {/* OTHERS */}
+           {/* OTHERS (ИЗМЕНЕНИЯ ТУТ) */}
            {peers.map(peer => (
              <div key={peer.id} className="flex flex-col items-center gap-1.5 min-w-[50px]">
                 <div className="w-10 h-10 rounded-full bg-indigo-900/50 border-2 border-indigo-500 flex items-center justify-center relative">
-                  <User size={16} className="text-indigo-300"/>
+                  {/* Первая буква имени */}
+                  <span className="text-xs font-bold text-indigo-200">
+                    {peer.username ? peer.username[0].toUpperCase() : '?'}
+                  </span>
                   <AudioPlayer stream={peer.stream} />
                 </div>
-                <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[50px]">Peer</span>
+                {/* Полное имя (обрезанное) */}
+                <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[60px]">
+                    {peer.username ? peer.username.split('@')[0] : 'Connecting...'}
+                </span>
              </div>
            ))}
         </div>
       </div>
     )
 }
-
 
 // 4. MAIN APP
 export default function DiscordLite() {
