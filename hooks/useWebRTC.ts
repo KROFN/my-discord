@@ -140,6 +140,14 @@ export function useWebRTC(roomId: string, user: any) {
         
         const pc = peerConnections.current[payload.from]
         if (pc) {
+          // --- ФИКС НАЧАЛО ---
+          // Проверяем: если мы уже 'stable' (соединены), то ответ нам не нужен.
+          if (pc.signalingState === 'stable') {
+            console.warn("⚠️ Ignore Answer: Connection is already stable")
+            return
+          }
+          // --- ФИКС КОНЕЦ ---
+
           await pc.setRemoteDescription(new RTCSessionDescription(payload.answer))
         }
       })
