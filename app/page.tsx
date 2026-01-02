@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useWebRTC } from '@/hooks/useWebRTC'
 import { 
-  Mic, MicOff, Hash, LogOut, Send, Volume2, 
+  Mic, MicOff, Hash, LogOut, Send, 
   Plus, Radio, User, MonitorCheck 
 } from 'lucide-react'
 import clsx from 'clsx'
@@ -16,7 +16,7 @@ type Message = { id: string; content: string; user_id: string; created_at: strin
 
 // --- COMPONENTS ---
 
-// 1. LOGIN SCREEN (Красивый вход)
+// 1. LOGIN SCREEN
 function AuthScreen({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -82,7 +82,72 @@ function AuthScreen({ onLogin }: { onLogin: () => void }) {
   )
 }
 
-// 2. MAIN APP
+// 2. AUDIO PLAYER (Helper)
+const AudioPlayer = ({ stream }: { stream: MediaStream }) => {
+  const ref = useRef<HTMLAudioElement>(null)
+  useEffect(() => {
+    if (ref.current && stream) ref.current.srcObject = stream
+  }, [stream])
+  return <audio ref={ref} autoPlay />
+}
+
+// 3. VOICE CONTROLS (ВЫНЕСЛИ НАРУЖУ!)
+// Теперь он не пересоздается при каждом нажатии клавиши
+function VoiceControls({ room, user }: { room: Room, user: any }) {
+    // Хук вызывается здесь. Пока пропсы room и user те же, хук живет и не перезагружается.
+    const { peers, localStream, isMuted, toggleMute } = useWebRTC(room.id, user)
+
+    return (
+      <div className="bg-emerald-950/30 border-t border-b border-emerald-900/50 backdrop-blur-sm p-3">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2.5">
+            <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+            </span>
+            <div className="flex flex-col">
+              <span className="text-emerald-400 text-xs font-bold uppercase tracking-wider">Voice Connected</span>
+              <span className="text-emerald-500/60 text-[10px] font-mono">P2P MESH ACTIVE</span>
+            </div>
+          </div>
+          
+          <button onClick={toggleMute} 
+            className={clsx(
+              "p-2 rounded-lg transition-all", 
+              isMuted ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-zinc-800 hover:bg-zinc-700 text-white"
+            )}>
+            {isMuted ? <MicOff size={16} /> : <Mic size={16} />}
+          </button>
+        </div>
+        
+        {/* Peers List */}
+        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+           {/* ME */}
+           <div className="flex flex-col items-center gap-1.5 min-w-[50px]">
+             <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-emerald-500/50 flex items-center justify-center relative overflow-hidden">
+                {user.email?.[0].toUpperCase()}
+                {isMuted && <div className="absolute inset-0 bg-red-500/50 flex items-center justify-center"><MicOff size={12}/></div>}
+             </div>
+             <span className="text-[10px] text-zinc-400 font-medium">You</span>
+           </div>
+
+           {/* OTHERS */}
+           {peers.map(peer => (
+             <div key={peer.id} className="flex flex-col items-center gap-1.5 min-w-[50px]">
+                <div className="w-10 h-10 rounded-full bg-indigo-900/50 border-2 border-indigo-500 flex items-center justify-center relative">
+                  <User size={16} className="text-indigo-300"/>
+                  <AudioPlayer stream={peer.stream} />
+                </div>
+                <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[50px]">Peer</span>
+             </div>
+           ))}
+        </div>
+      </div>
+    )
+}
+
+
+// 4. MAIN APP
 export default function DiscordLite() {
   const [user, setUser] = useState<any>(null)
   const [rooms, setRooms] = useState<Room[]>([])
@@ -161,60 +226,6 @@ export default function DiscordLite() {
     }
   }
 
-  // --- VOICE UI COMPONENT ---
-  const VoiceControls = () => {
-    if (!currentRoom || !user) return null
-    const { peers, localStream, isMuted, toggleMute } = useWebRTC(currentRoom.id, user)
-
-    return (
-      <div className="bg-emerald-950/30 border-t border-b border-emerald-900/50 backdrop-blur-sm p-3">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2.5">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-            </span>
-            <div className="flex flex-col">
-              <span className="text-emerald-400 text-xs font-bold uppercase tracking-wider">Voice Connected</span>
-              <span className="text-emerald-500/60 text-[10px] font-mono">P2P MESH ACTIVE</span>
-            </div>
-          </div>
-          
-          <button onClick={toggleMute} 
-            className={clsx(
-              "p-2 rounded-lg transition-all", 
-              isMuted ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-zinc-800 hover:bg-zinc-700 text-white"
-            )}>
-            {isMuted ? <MicOff size={16} /> : <Mic size={16} />}
-          </button>
-        </div>
-        
-        {/* Peers List */}
-        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-           {/* ME */}
-           <div className="flex flex-col items-center gap-1.5 min-w-[50px]">
-             <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-emerald-500/50 flex items-center justify-center relative overflow-hidden">
-                {user.email?.[0].toUpperCase()}
-                {isMuted && <div className="absolute inset-0 bg-red-500/50 flex items-center justify-center"><MicOff size={12}/></div>}
-             </div>
-             <span className="text-[10px] text-zinc-400 font-medium">You</span>
-           </div>
-
-           {/* OTHERS */}
-           {peers.map(peer => (
-             <div key={peer.id} className="flex flex-col items-center gap-1.5 min-w-[50px]">
-                <div className="w-10 h-10 rounded-full bg-indigo-900/50 border-2 border-indigo-500 flex items-center justify-center relative">
-                  <User size={16} className="text-indigo-300"/>
-                  <AudioPlayer stream={peer.stream} />
-                </div>
-                <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[50px]">Peer</span>
-             </div>
-           ))}
-        </div>
-      </div>
-    )
-  }
-
   if (!user) return <AuthScreen onLogin={() => window.location.reload()} />
 
   return (
@@ -222,7 +233,6 @@ export default function DiscordLite() {
       
       {/* SIDEBAR */}
       <aside className="w-72 bg-[#0c0c0e] flex flex-col border-r border-zinc-800/60 shadow-xl z-20">
-        {/* Sidebar Header */}
         <div className="h-14 flex items-center px-4 border-b border-zinc-800/60 bg-[#0c0c0e]">
           <span className="font-bold text-lg tracking-tight flex items-center gap-2">
             <Radio className="text-indigo-500" size={20} />
@@ -230,7 +240,6 @@ export default function DiscordLite() {
           </span>
         </div>
 
-        {/* Room List */}
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
           <div className="text-xs font-semibold text-zinc-500 uppercase px-2 mb-2 tracking-wider">Voice Channels</div>
           {rooms.map(room => (
@@ -252,7 +261,6 @@ export default function DiscordLite() {
           </button>
         </div>
 
-        {/* User Profile (Bottom) */}
         <div className="p-3 bg-[#09090b] border-t border-zinc-800/60">
            <div className="flex items-center gap-3 p-2 rounded-lg hover:bg-zinc-800/50 transition-colors">
               <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-sm font-bold shadow-lg shadow-indigo-500/20 text-white shrink-0">
@@ -273,28 +281,19 @@ export default function DiscordLite() {
       <main className="flex-1 flex flex-col min-w-0 bg-[#09090b] relative">
         {currentRoom ? (
           <>
-            {/* Chat Header */}
             <header className="h-14 border-b border-zinc-800/60 flex items-center px-6 bg-[#09090b]/80 backdrop-blur-md sticky top-0 z-10">
               <Hash className="mr-3 text-zinc-500" size={20} />
               <span className="font-bold text-white tracking-tight">{currentRoom.name}</span>
-              <div className="ml-auto flex items-center gap-4 text-zinc-500">
-                 <MonitorCheck size={18} className="hover:text-zinc-300 cursor-pointer transition-colors" />
-                 <div className="w-px h-4 bg-zinc-800"></div>
-                 <User size={18} className="hover:text-zinc-300 cursor-pointer transition-colors" />
-              </div>
             </header>
             
-            {/* Messages List */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
               {messages.map((msg, i) => {
                 const isMe = msg.user_id === user.id
                 return (
                   <div key={msg.id} className={clsx("flex gap-4 group", isMe && "flex-row-reverse")}>
-                     {/* Avatar */}
                      <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 text-sm font-bold shrink-0 mt-0.5 border border-zinc-800">
                         {msg.profiles?.username?.[0].toUpperCase() || '?'}
                      </div>
-                     
                      <div className={clsx("flex flex-col max-w-[70%]", isMe ? "items-end" : "items-start")}>
                         <div className="flex items-baseline gap-2 mb-1">
                           <span className={clsx("font-semibold text-sm", isMe ? "text-indigo-400" : "text-zinc-300")}>
@@ -319,13 +318,14 @@ export default function DiscordLite() {
               <div ref={messagesEndRef} className="h-4" />
             </div>
 
-            {/* Controls Area (Fixed Bottom) */}
             <div className="bg-[#09090b] px-4 pb-6 pt-2">
               <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl">
-                {/* Voice Status Here */}
-                <VoiceControls />
+                
+                {/* ВСТАВЛЯЕМ КОМПОНЕНТ ВОТ ТАК - ЭТО БЕЗОПАСНО */}
+                {currentRoom && user && (
+                    <VoiceControls room={currentRoom} user={user} />
+                )}
 
-                {/* Message Input */}
                 <form onSubmit={sendMessage} className="relative p-2 flex items-center gap-2">
                   <button type="button" className="p-2 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 rounded-full transition-colors">
                     <Plus size={20} />
@@ -356,13 +356,4 @@ export default function DiscordLite() {
       </main>
     </div>
   )
-}
-
-// Audio helper
-const AudioPlayer = ({ stream }: { stream: MediaStream }) => {
-  const ref = useRef<HTMLAudioElement>(null)
-  useEffect(() => {
-    if (ref.current && stream) ref.current.srcObject = stream
-  }, [stream])
-  return <audio ref={ref} autoPlay />
 }
