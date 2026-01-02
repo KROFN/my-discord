@@ -24,7 +24,12 @@ export function useWebRTC(roomId: string, user: any) {
   const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({})
   const peerUsernames = useRef<{ [key: string]: string }>({}) 
   const channelRef = useRef<RealtimeChannel | null>(null)
-  const screenTrackRef = useRef<MediaStreamTrack | null>(null) // Храним трек экрана
+  const screenTrackRef = useRef<MediaStreamTrack | null>(null)
+  
+  // Флаг: "Я сейчас пытаюсь сделать оффер?" (нужен для решения конфликтов)
+  const makingOfferRef = useRef<{ [key: string]: boolean }>({})
+  const ignoreOfferRef = useRef<{ [key: string]: boolean }>({})
+  
   const supabase = createClient()
 
   // 1. ЗАХВАТ МИКРОФОНА
@@ -46,13 +51,11 @@ export function useWebRTC(roomId: string, user: any) {
     return () => { mounted = false }
   }, [user])
 
-  // 2. ФУНКЦИЯ ВКЛ/ВЫКЛ ЭКРАНА
+  // 2. УПРАВЛЕНИЕ ЭКРАНОМ
   const toggleScreenShare = async () => {
     if (isScreenSharing) {
-      // ВЫКЛЮЧАЕМ
       stopScreenShare()
     } else {
-      // ВКЛЮЧАЕМ
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
         const screenTrack = screenStream.getVideoTracks()[0]
@@ -60,16 +63,13 @@ export function useWebRTC(roomId: string, user: any) {
         screenTrackRef.current = screenTrack
         setIsScreenSharing(true)
 
-        // Добавляем трек экрана во все активные соединения
+        // Добавляем трек во все соединения. Это триггернет 'negotiationneeded'
         Object.values(peerConnections.current).forEach(pc => {
-          // sender заменяет или добавляет трек. В Mesh проще добавить новый.
-          // Используем addTrack, он триггернет negotiationneeded
           if (localStream) {
              pc.addTrack(screenTrack, localStream) 
           }
         })
 
-        // Если юзер нажмет "Остановить" в браузере (системная плашка)
         screenTrack.onended = () => stopScreenShare()
 
       } catch (err) {
@@ -80,22 +80,18 @@ export function useWebRTC(roomId: string, user: any) {
 
   const stopScreenShare = () => {
     if (screenTrackRef.current) {
-      screenTrackRef.current.stop() // Останавливаем захват
-      
-      // Удаляем трек из всех соединений
+      screenTrackRef.current.stop()
       Object.values(peerConnections.current).forEach(pc => {
         const senders = pc.getSenders()
         const videoSender = senders.find(s => s.track?.kind === 'video')
-        if (videoSender) {
-          pc.removeTrack(videoSender)
-        }
+        if (videoSender) pc.removeTrack(videoSender)
       })
       screenTrackRef.current = null
       setIsScreenSharing(false)
     }
   }
 
-  // 3. СИГНАЛИЗАЦИЯ
+  // 3. СИГНАЛИЗАЦИЯ (PERFECT NEGOTIATION PATTERN)
   useEffect(() => {
     if (!roomId || !user || !localStream) return
     if (channelRef.current) return
@@ -105,47 +101,50 @@ export function useWebRTC(roomId: string, user: any) {
     const createPeerConnection = (peerId: string) => {
       if (peerConnections.current[peerId]) return peerConnections.current[peerId]
 
-      console.log(`🔗 Creating NEW PeerConnection with ${peerId}`)
       const pc = new RTCPeerConnection(ICE_SERVERS)
       peerConnections.current[peerId] = pc
+      makingOfferRef.current[peerId] = false
+      ignoreOfferRef.current[peerId] = false
 
-      // Добавляем аудио
+      // Добавляем треки
       localStream.getTracks().forEach((track) => pc.addTrack(track, localStream))
-      // Если уже стримим экран, добавляем и его сразу при подключении нового юзера
       if (screenTrackRef.current) {
         pc.addTrack(screenTrackRef.current, localStream)
       }
 
-      // --- RENEGOTIATION (ВАЖНО ДЛЯ ЭКРАНА) ---
-      // Когда мы добавляем видео-трек, WebRTC понимает, что нужно обновить настройки
+      // --- ГЛАВНАЯ МАГИЯ: ON NEGOTIATION NEEDED ---
       pc.onnegotiationneeded = async () => {
+        try {
+          makingOfferRef.current[peerId] = true
           console.log(`🔄 Negotiation needed with ${peerId}`)
-          try {
-             // Проверка состояния, чтобы не нарваться на ошибку "stable"
-             if (pc.signalingState !== "stable") return;
+          
+          const offer = await pc.createOffer()
+          // Если мы в состоянии конфликта, setLocalDescription может упасть, это ок
+          if (pc.signalingState !== 'stable') return 
 
-             const offer = await pc.createOffer()
-             await pc.setLocalDescription(offer)
-             
-             channel.send({
-                type: 'broadcast',
-                event: 'offer',
-                payload: { offer, to: peerId, from: user.id, username: user.email },
-             })
-          } catch (e) {
-             console.warn("Negotiation error:", e)
-          }
+          await pc.setLocalDescription(offer)
+          
+          channel.send({
+             type: 'broadcast',
+             event: 'offer',
+             payload: { offer, to: peerId, from: user.id, username: user.email },
+          })
+        } catch (err) {
+          console.error("Negotiation error:", err)
+        } finally {
+          makingOfferRef.current[peerId] = false
+        }
       }
 
       pc.ontrack = (event) => {
-        console.log(`🔊/📺 Received track from ${peerId}:`, event.track.kind)
         const [remoteStream] = event.streams
-        
         const name = peerUsernames.current[peerId] || 'Unknown'
+        console.log(`📺 Received ${event.track.kind} track from ${name}`)
+        
         setPeers((prev) => {
-          // Если такой пир есть, обновляем его стрим (там могло появиться видео)
           const existing = prev.find(p => p.id === peerId)
           if (existing) {
+             // Если стрим обновился (добавилось видео), обновляем объект
              return prev.map(p => p.id === peerId ? { ...p, stream: remoteStream } : p)
           }
           return [...prev, { id: peerId, stream: remoteStream, username: name }]
@@ -178,36 +177,50 @@ export function useWebRTC(roomId: string, user: any) {
     })
 
     channel
-      .on('presence', { event: 'join' }, async ({ key }) => {
+      .on('presence', { event: 'join' }, ({ key }) => {
         if (key === user.id) return
-        createPeerConnection(key) 
-        // Мы НЕ создаем оффер тут вручную, так как сработает onnegotiationneeded при добавлении треков
+        createPeerConnection(key)
+        // Не создаем оффер вручную, onnegotiationneeded сделает это сам
       })
       .on('presence', { event: 'leave' }, ({ key }) => {
         setPeers(prev => prev.filter(p => p.id !== key))
         if (peerConnections.current[key]) {
-          peerConnections.current[key].close()
-          delete peerConnections.current[key]
+           peerConnections.current[key].close()
+           delete peerConnections.current[key]
         }
       })
+      
+      // --- ОБРАБОТКА КОНФЛИКТОВ (GLARE) ---
       .on('broadcast', { event: 'offer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
         if (payload.username) peerUsernames.current[payload.from] = payload.username
 
         const pc = createPeerConnection(payload.from)
         
-        // Избегаем конфликтов
-        if (pc.signalingState !== "stable") {
-             // Если мы уже что-то настраиваем, можно проигнорировать или откатить.
-             // Для простоты: пробуем установить remote
-             await Promise.all([
-                pc.setLocalDescription({type: "rollback"}),
-                pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
-             ]).catch(() => pc.setRemoteDescription(new RTCSessionDescription(payload.offer)))
+        // КТО ВЕЖЛИВЫЙ? (Сравниваем строки ID)
+        // Если мой ID меньше (лексикографически) -> я вежливый, я уступаю.
+        const polite = user.id.localeCompare(payload.from) < 0 
+
+        const offerCollision = makingOfferRef.current[payload.from] || pc.signalingState !== 'stable'
+
+        // Если конфликт:
+        if (offerCollision) {
+           if (!polite) {
+             console.warn("🛡️ Impolite: Ignoring colliding offer")
+             ignoreOfferRef.current[payload.from] = true
+             return // Я наглый, я игнорирую твой оффер, жди моего
+           }
+           console.log("🙇‍♂️ Polite: Rolling back to accept offer")
+           // Я вежливый - откатываюсь, чтобы принять твой оффер
+           await Promise.all([
+             pc.setLocalDescription({ type: "rollback" }),
+             pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
+           ])
         } else {
-             await pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
+           // Нет конфликта - просто принимаем
+           await pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
         }
-        
+
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
@@ -217,23 +230,34 @@ export function useWebRTC(roomId: string, user: any) {
           payload: { answer, to: payload.from, from: user.id, username: user.email },
         })
       })
+      
       .on('broadcast', { event: 'answer' }, async ({ payload }) => {
         if (payload.to !== user.id) return
         if (payload.username) peerUsernames.current[payload.from] = payload.username
-
+        
         const pc = peerConnections.current[payload.from]
-        if (pc && pc.signalingState !== 'stable') { 
-          await pc.setRemoteDescription(new RTCSessionDescription(payload.answer))
+        if (pc) {
+           if (ignoreOfferRef.current[payload.from]) {
+             console.log("🙈 Ignoring answer because we marked connection as ignored")
+             ignoreOfferRef.current[payload.from] = false
+             return
+           }
+           try {
+             await pc.setRemoteDescription(new RTCSessionDescription(payload.answer))
+           } catch (e) {
+             console.warn("Failed to set remote answer:", e)
+           }
         }
       })
       .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
         if (payload.to !== user.id) return
         const pc = peerConnections.current[payload.from]
-        if (pc && pc.remoteDescription) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
-          } catch (e) { console.warn(e) }
-        }
+        try {
+           // Иногда ICE приходит раньше RemoteDescription, это норма, игнорируем ошибку
+           if (pc && pc.remoteDescription) {
+              await pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
+           }
+        } catch (ignored) {}
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -244,7 +268,6 @@ export function useWebRTC(roomId: string, user: any) {
           for (const peerId of Object.keys(state)) {
              if (peerId === user.id || peerConnections.current[peerId]) continue 
              createPeerConnection(peerId) 
-             // Оффер полетит сам из onnegotiationneeded
           }
         }
       })
